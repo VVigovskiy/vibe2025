@@ -2,86 +2,129 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
+const url = require('url');
+const querystring = require('querystring');
 
 const PORT = 3000;
-
-// Database connection settings
 const dbConfig = {
     host: 'localhost',
     user: 'root',
     password: '',
     database: 'todolist',
-  };
+};
 
+const pool = mysql.createPool({
+    ...dbConfig,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
 
-  async function retrieveListItems() {
-    try {
-      // Create a connection to the database
-      const connection = await mysql.createConnection(dbConfig);
-      
-      // Query to select all items from the database
-      const query = 'SELECT id, text FROM items';
-      
-      // Execute the query
-      const [rows] = await connection.execute(query);
-      
-      // Close the connection
-      await connection.end();
-      
-      // Return the retrieved items as a JSON array
-      return rows;
-    } catch (error) {
-      console.error('Error retrieving list items:', error);
-      throw error; // Re-throw the error
-    }
-  }
+async function parseBody(req) {
+    return new Promise((resolve) => {
+        let body = '';
+        req.on('data', (chunk) => body += chunk.toString());
+        req.on('end', () => resolve(querystring.parse(body)));
+    });
+}
 
-// Stub function for generating HTML rows
+async function getAllItems() {
+    const [rows] = await pool.query('SELECT id, text FROM items');
+    return rows;
+}
+
+async function addItem(text) {
+    const [result] = await pool.query(
+        'INSERT INTO items (text) VALUES (?)',
+        [text]
+    );
+    return result.insertId;
+}
+
+async function updateItem(id, text) {
+    await pool.query(
+        'UPDATE items SET text = ? WHERE id = ?',
+        [text, id]
+    );
+}
+
+async function deleteItem(id) {
+    await pool.query(
+        'DELETE FROM items WHERE id = ?',
+        [id]
+    );
+}
+
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
+}
+
 async function getHtmlRows() {
-    // Example data - replace with actual DB data later
-    /*
-    const todoItems = [
-        { id: 1, text: 'First todo item' },
-        { id: 2, text: 'Second todo item' }
-    ];*/
-
-    const todoItems = await retrieveListItems();
-
-    // Generate HTML for each item
-    return todoItems.map(item => `
-        <tr>
+    const items = await getAllItems();
+    return items.map(item => `
+        <tr data-id="${item.id}">
             <td>${item.id}</td>
-            <td>${item.text}</td>
-            <td><button class="delete-btn">×</button></td>
+            <td class="item-text">${escapeHtml(item.text)}</td>
+            <td>
+                <button class="edit-btn">Edit</button>
+                <button class="delete-btn">Remove</button>
+            </td>
         </tr>
     `).join('');
 }
 
-// Modified request handler with template replacement
 async function handleRequest(req, res) {
-    if (req.url === '/') {
+    const parsedUrl = url.parse(req.url, true);
+    
+    // Serve index.html
+    if (req.method === 'GET' && parsedUrl.pathname === '/') {
         try {
-            const html = await fs.promises.readFile(
-                path.join(__dirname, 'index.html'), 
-                'utf8'
-            );
-            
-            // Replace template placeholder with actual content
+            const html = await fs.promises.readFile('index.html', 'utf8');
             const processedHtml = html.replace('{{rows}}', await getHtmlRows());
-            
-            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.writeHead(200, {'Content-Type': 'text/html'});
             res.end(processedHtml);
         } catch (err) {
-            console.error(err);
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Error loading index.html');
+            res.writeHead(500);
+            res.end('Server Error');
         }
-    } else {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Route not found');
+    }
+    
+    // API endpoints
+    else if (req.method === 'POST') {
+        const body = await parseBody(req);
+        
+        if (parsedUrl.pathname === '/add') {
+            const id = await addItem(body.text);
+            res.writeHead(200, {'Content-Type': 'application/json'});
+            res.end(JSON.stringify({id}));
+        }
+        else if (parsedUrl.pathname === '/update') {
+            await updateItem(body.id, body.text);
+            res.writeHead(200);
+            res.end();
+        }
+        else if (parsedUrl.pathname === '/delete') {
+            await deleteItem(body.id);
+            res.writeHead(200);
+            res.end();
+        }
+        else {
+            res.writeHead(404);
+            res.end();
+        }
+    }
+    else {
+        res.writeHead(404);
+        res.end();
     }
 }
 
-// Create and start server
 const server = http.createServer(handleRequest);
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
